@@ -1,4 +1,17 @@
-.env
+# Python
 __pycache__/
 *.pyc
 .venv/
+
+# aAmbiente local
+.env
+
+# Logs e dados gerados em runtime
+logs/
+*.jsonl
+
+# Material acadêmico pessoal
+paper/
+
+# Notas de trabalho / planejamento
+ROADMAP.md
