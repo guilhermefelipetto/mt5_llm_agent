@@ -3,16 +3,7 @@
 Agente de trading **stateful** que usa LLMs para tomar decisões em tempo real no MetaTrader 5.
 A cada `ANALYSIS_INTERVAL` segundos, o pipeline coleta dados multi-timeframe, computa indicadores técnicos, testes estatísticos e modelos de volatilidade (GARCH/HAR-RV), injeta o estado da posição aberta no prompt e consulta a OpenAI - que responde com uma ação: `OPEN_LONG`, `OPEN_SHORT`, `HOLD`, `CLOSE` (sair antes de SL/TP) ou `TIGHTEN_STOP` (apertar SL para travar lucro).
 
-```
-MetaTrader 5 (MQL5 EA)
-   │  GET /signal (poll periódico)
-   ▼
-FastAPI (Python) ──► OpenAI (json_schema strict)
-   │                       │
-   │  MT5 API + yfinance   └─► signals.jsonl
-   ▼
- OHLCV multi-TF + posição aberta → contexto → prompt
-```
+![Logo do Projeto](images/Diagrama%20MT5.png)
 
 ---
 
