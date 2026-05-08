@@ -76,7 +76,7 @@ pip install mt5linux
 
 No mesmo terminal cmd do Bottles (**MT5 deve estar aberto e conectado ao broker**):
 
-```
+```bash
 drive_c\users\steamuser\AppData\Local\Programs\Python\Python311\python.exe -m mt5linux --host 127.0.0.1 -p 18812
 ```
 
@@ -120,7 +120,7 @@ O **timeframe do gráfico não importa** - `OnTick()` dispara em todo tick, inde
 
 | Variável | Padrão | Descrição |
 |---|---|---|
-| `MODEL_VERSION` | `v1.6.0` | Tag de versão nos logs |
+| `MODEL_VERSION` | `v1.8.0` | Tag de versão nos logs |
 | `OPENAI_API_KEY` | - | Chave da OpenAI |
 | `OPENAI_MODEL` | `gpt-4o` | Modelo OpenAI (suporta `json_schema` strict) |
 | `SYMBOL` | `EURUSD` | Símbolo no broker (MT5) |
@@ -130,14 +130,16 @@ O **timeframe do gráfico não importa** - `OnTick()` dispara em todo tick, inde
 | `MT5_PORT` | `18812` | Porta do bridge mt5linux |
 | `VOL_ESTIMATOR` | `garch` | `garch` \| `har_rv` \| `atr` |
 | `PIP_SIZE` | `0.0001` | Tamanho do pip (EURUSD) |
-| `ANALYSIS_INTERVAL` | `300` | Segundos entre análises |
+| `ANALYSIS_INTERVAL` | `300` | Segundos entre análises (flat — quando há posição, cadência vira `min(cadence_s)` entre os horizontes ativos) |
+| `MAX_POSITIONS` | `3` | Teto de posições simultâneas (uma por horizonte/lado) |
 | `MIN_CONFIDENCE` | `0.6` | Confiança mínima para agir |
 | `RISK_PER_TRADE_PCT` | `1.0` | Risco-alvo por trade (% do equity) |
 | `PIP_VALUE_PER_LOT` | `10.0` | USD por pip por 1 lote (EURUSD/USD ≈ 10) |
 | `MIN_LOT` / `MAX_LOT` / `LOT_STEP` | `0.01` / `1.0` / `0.01` | Bounds e passo do broker |
-| `DAILY_DRAWDOWN_PCT` | `2.0` | Circuit breaker - % do equity perdível por dia |
-| `MAX_CONSECUTIVE_LOSSES` | `3` | Circuit breaker - perdas seguidas no dia |
-| `MAX_TRADE_AGE_HOURS` | `24` | Time exit - força CLOSE em trade muito velho (0 desliga) |
+| `DAILY_DRAWDOWN_PCT` | `2.0` | Circuit breaker — % do equity perdível por dia |
+| `MAX_CONSECUTIVE_LOSSES` | `3` | Circuit breaker — perdas seguidas no dia |
+
+> **Perfis de horizonte** (SL/TP, time exit, cadência por horizonte) ficam em `config.HORIZON_PROFILES` no código — defaults sensatos pra scalp/intraday/swing. Edite lá se quiser tunar; não estão expostos no `.env` por enquanto.
 
 ---
 

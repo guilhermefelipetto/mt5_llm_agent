@@ -7,6 +7,9 @@ DATA_SOURCE=yfinance → usa apenas yfinance (sem dependência de MT5)
 Vantagem do MT5:
   - Dados do próprio broker (sem gap de preço entre análise e execução)
   - Histórico maior (ex: 5000 barras de 1h vs. ~1400 do yfinance)
+
+A flag `last_source` permite ao servidor logar e ao dashboard alertar
+quando o fallback yfinance disparou silenciosamente (gotcha já vivido).
 """
 
 from config import settings
@@ -16,16 +19,27 @@ from data.yf_source import get_ohlcv_yf
 import pandas as pd
 
 
+# Última fonte usada com sucesso - atualizada a cada call de get_ohlcv.
+# Lida pelo logger do servidor e pelo dashboard pra alertar fallback silencioso.
+last_source: str = "unknown"
+
+
 def get_ohlcv(yf_symbol: str, timeframes: list[str]) -> dict[str, pd.DataFrame]:
     """
     Retorna dict {tf: DataFrame OHLCV} para os timeframes solicitados.
 
     Prioriza MT5 quando DATA_SOURCE=mt5; cai para yfinance se MT5 falhar.
+    Atualiza `last_source` com a fonte efetivamente usada.
     """
+    global last_source
+
     if settings.data_source == "mt5":
         result = get_ohlcv_mt5(settings.symbol, timeframes)
         if result:
+            last_source = "mt5"
             return result
         print("[!] MT5 indisponível - usando yfinance como fallback", flush=True)
 
-    return get_ohlcv_yf(yf_symbol, timeframes)
+    result = get_ohlcv_yf(yf_symbol, timeframes)
+    last_source = "yfinance" if result else "unknown"
+    return result

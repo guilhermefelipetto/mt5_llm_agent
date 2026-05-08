@@ -1,18 +1,17 @@
 """
-Constrói o prompt enviado ao LLM, com hierarquia top-down dos timeframes.
+Constrói o prompt enviado ao LLM, com hierarquia condicional de TFs por
+horizonte e suporte a múltiplas posições simultâneas (v1.7).
 
-Princípio: timeframes maiores definem direção macro; menores definem timing.
-A ordem do prompt e a instrução do system prompt reforçam essa hierarquia.
-
-A partir da v1.4 o prompt também injeta a posição aberta atual quando existe,
-permitindo decisões stateful (CLOSE antes de SL/TP, TIGHTEN_STOP, HOLD).
+Princípio fundamental: o TF dominante depende do horizonte da operação,
+não é fixo. Para cada posição aberta, o prompt destaca qual TF usar como
+referência primária e quais TFs são apenas viés ou ruído.
 """
 
+from config import HORIZON_PROFILES, settings
 from data.positions import OpenPosition
 
-# Ordem hierárquica top-down (maior → menor TF)
-_TF_ORDER = ["1d", "4h", "1h", "5m", "1m"]
 
+_TF_ORDER = ["1d", "4h", "1h", "5m", "1m"]
 _TF_LABELS = {
     "1d": "Macro tendência",
     "4h": "Tendência intermediária",
@@ -21,42 +20,86 @@ _TF_LABELS = {
     "1m": "Microestrutura",
 }
 
-SYSTEM_PROMPT = (
-    "Você é um analista quantitativo de mercados forex com formação em "
-    "estatística e séries temporais. Analise o contexto multi-timeframe abaixo "
-    "e produza um objeto JSON com os campos:\n"
-    '  - "action": "OPEN_LONG" | "OPEN_SHORT" | "HOLD" | "CLOSE" | "TIGHTEN_STOP"\n'
-    '  - "confidence": número entre 0.0 e 1.0\n'
-    '  - "reasoning": justificativa técnica curta (1-2 frases)\n'
-    '  - "new_sl": preço absoluto do novo SL (apenas para TIGHTEN_STOP, '
-    'caso contrário null)\n\n'
-    "VOCABULÁRIO DE AÇÕES:\n"
-    "- OPEN_LONG / OPEN_SHORT: abre nova posição. Se já houver posição na "
-    "direção oposta, o sistema fecha e inverte automaticamente.\n"
-    "- HOLD: não fazer nada. Se há posição aberta, deixa o trade correr até "
-    "SL/TP. Se está flat, não opera.\n"
-    "- CLOSE: encerra a posição atual ANTES de SL/TP - use quando a tese "
-    "original do trade quebrou (regime mudou, tendência inverteu, contexto "
-    "macro virou contra).\n"
-    "- TIGHTEN_STOP: aperta o SL para travar lucro acumulado. Só permitido "
-    "MOVENDO na direção do preço (long: subir SL; short: descer SL). "
-    "O sistema rejeita afrouxamentos automaticamente.\n\n"
-    "REGRAS DE ANÁLISE:\n"
-    "1. Tendências em timeframes MAIORES (D1, 4H) DOMINAM sinais de timeframes menores. "
-    "Não opere contra a tendência macro a menos que haja evidência muito forte.\n"
-    "2. Use timeframes menores apenas para timing - não para definir direção.\n"
-    "3. Considere os regimes estatísticos: Hurst (persistência global) e VRT (autocorrelação local). "
-    "Em regime persistente (Hurst > 0.55, VR > 1), favoreça estratégias de continuação; "
-    "em reversão à média (Hurst < 0.45, VR < 1), favoreça reversão; "
-    "em random walk, prefira HOLD salvo confluência forte.\n"
-    "4. Use as previsões de volatilidade (GARCH/HAR-RV) para contextualizar o risco. "
-    "Alta persistência GARCH (α+β > 0.95) indica que a volatilidade atual tende a continuar.\n"
-    "5. Se houver conflito entre timeframes adjacentes, prefira HOLD.\n"
-    "6. GESTÃO DE POSIÇÃO ABERTA: quando a seção [POSIÇÃO ATUAL] estiver presente, "
-    "avalie se a tese original ainda vale. Considere CLOSE se o regime virou; "
-    "TIGHTEN_STOP se o trade já acumulou lucro relevante e quer travar parte; "
-    "HOLD se a tese segue íntegra. Não force operação - HOLD é resposta válida."
-)
+
+def _system_prompt() -> str:
+    """System prompt construído dinamicamente para refletir os limites
+    do agente (max_positions, perfis de horizonte ativos)."""
+    profiles_lines = []
+    for h, prof in HORIZON_PROFILES.items():
+        profiles_lines.append(
+            f"  - {h}: TF dominante {prof['dominant_tfs']}; SL≈{prof['sl_mult']}σ, "
+            f"TP≈{prof['tp_mult']}σ; time exit {prof['max_age_hours']}h"
+        )
+    profiles_block = "\n".join(profiles_lines)
+
+    return (
+        "Você é um analista quantitativo de mercados forex com formação em "
+        "estatística e séries temporais.\n\n"
+
+        "FORMATO DE RESPOSTA (JSON estrito):\n"
+        '  - "action": "OPEN_LONG" | "OPEN_SHORT" | "HOLD" | "CLOSE" | "TIGHTEN_STOP"\n'
+        '  - "intended_horizon": "scalp" | "intraday" | "swing" | null\n'
+        '  - "position_id": ticket da posição-alvo (CLOSE/TIGHTEN_STOP) ou null\n'
+        '  - "confidence": 0.0 a 1.0\n'
+        '  - "reasoning": justificativa técnica curta (1-2 frases)\n'
+        '  - "new_sl": novo SL para TIGHTEN_STOP, senão null\n\n'
+
+        "VOCABULÁRIO:\n"
+        "- OPEN_LONG / OPEN_SHORT: abre nova posição. intended_horizon "
+        "obrigatório. Sistema calcula SL/TP automaticamente conforme o "
+        "horizonte escolhido.\n"
+        "- HOLD: não fazer nada. Slot vazio é melhor que slot com trade ruim - "
+        "não opere só porque há slots disponíveis.\n"
+        "- CLOSE: encerra uma posição existente antes de SL/TP. Use quando a "
+        "tese original quebrou. Com múltiplas posições abertas, position_id "
+        "é obrigatório.\n"
+        "- TIGHTEN_STOP: aperta o SL para travar lucro acumulado. Só "
+        "permitido movendo na direção do preço (long: subir SL; short: "
+        "descer SL). Sistema rejeita afrouxamentos.\n\n"
+
+        f"PERFIS DE HORIZONTE:\n{profiles_block}\n\n"
+
+        "HIERARQUIA CONDICIONAL DE TIMEFRAMES:\n"
+        "Cada horizonte tem TF DOMINANTE diferente. NÃO aplique a mesma "
+        "regra para todos os trades:\n"
+        "- Para SWING (D1 dominante): D1 e 4H são primários; H1 é contexto; "
+        "M5 e M1 são RUÍDO - não use como veto.\n"
+        "- Para INTRADAY (H1 dominante): H1 e M30 são primários; 4H/D1 dão "
+        "viés macro (mas não vetam); M5 dá timing de entrada; M1 é ruído.\n"
+        "- Para SCALP (M5 dominante): M5 e M1 são primários; M15/H1 dão "
+        "estrutura de curto prazo; D1 é apenas viés muito amplo (não veta).\n"
+        "Nunca recuse um trade de scalp porque D1 está em direção contrária - "
+        "para scalp, D1 é ruído na escala em que você opera.\n\n"
+
+        f"MULTI-POSITION (até {settings.max_positions} simultâneas):\n"
+        "- Permitido abrir múltiplas posições, MAS uma por (lado, horizonte). "
+        "Não dobre aposta no mesmo setup - se já há LONG intraday aberto, "
+        "novo OPEN_LONG só se for de outro horizonte (scalp ou swing).\n"
+        f"- Risco máximo agregado = {settings.max_positions} × "
+        f"{settings.risk_per_trade_pct}% = {settings.max_positions * settings.risk_per_trade_pct:.1f}% "
+        "do equity se todas baterem SL juntas.\n\n"
+
+        "REGRAS DE ANÁLISE:\n"
+        "1. Considere os regimes estatísticos: Hurst (persistência global) e "
+        "VRT (autocorrelação local). Em regime persistente (Hurst > 0.55), "
+        "favoreça continuação; em reversão à média (Hurst < 0.45), favoreça "
+        "reversão; em random walk, prefira HOLD salvo confluência forte.\n"
+        "2. Use as previsões de volatilidade (GARCH/HAR-RV) para contextualizar "
+        "o risco. Persistência GARCH alta (α+β > 0.95) indica que a volatilidade "
+        "atual tende a continuar.\n"
+        "3. GESTÃO DE POSIÇÃO ABERTA: avalie se a tese original ainda vale. "
+        "Considere CLOSE se o regime virou contra; TIGHTEN_STOP se acumulou "
+        "lucro relevante e quer travar parte; HOLD se a tese segue íntegra. "
+        "Use o TF dominante do horizonte da posição como referência primária.\n"
+        "4. CALIBRE-SE PELO TRACK RECORD quando disponível: se a seção "
+        "[SEU TRACK RECORD] mostrar baixo win rate (<40%) num bucket "
+        "(regime, horizonte, lado) específico, RECONSIDERE entrar nesse "
+        "bucket — talvez o lado oposto, outro horizonte ou HOLD. Win rate "
+        "alto (>60%) com amostra >= 10 é validação parcial. Amostras n<10 "
+        "são ruído.\n"
+        "5. Não force operação - HOLD é resposta válida e frequentemente "
+        "correta."
+    )
 
 
 def _format_statistics(stats: dict) -> str:
@@ -93,33 +136,53 @@ def _format_vol_forecast(vol_forecast: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_position(
-    pos: OpenPosition, original_reasoning: str | None = None
-) -> list[str]:
-    pnl_sign = "+" if pos.pnl_pips >= 0 else ""
-    lines = [
-        "[POSIÇÃO ATUAL]",
-        f"  Lado: {pos.side}  |  Lote: {pos.lot}",
-        f"  Entrada: {pos.entry_price}  →  Atual: {pos.current_price}",
-        f"  P&L: {pnl_sign}{pos.pnl_pips} pips ({pnl_sign}{pos.pnl_pct:.3f}%)",
-        f"  SL atual: {pos.sl_price}   TP atual: {pos.tp_price}",
-        f"  Aberta há: {pos.age_minutes:.0f} min",
-    ]
-    if original_reasoning:
-        # Auto-crítica: o LLM revisita a tese que ele mesmo articulou na abertura.
-        lines.append(f'  Tese original: "{original_reasoning}"')
+def _format_positions(positions: list[OpenPosition]) -> list[str]:
+    if not positions:
+        return [
+            f"[POSIÇÕES ATUAIS] Nenhuma — você está flat. "
+            f"Pode abrir até {settings.max_positions} posições "
+            f"(uma por horizonte).",
+            "",
+        ]
+    lines = [f"[POSIÇÕES ATUAIS] {len(positions)} aberta(s):"]
+    for i, p in enumerate(positions, 1):
+        sign = "+" if p.pnl_pips >= 0 else ""
+        prof = HORIZON_PROFILES[p.intended_horizon]
+        inferred_tag = "  (horizonte inferido)" if p.horizon_inferred else ""
+        lines.append(
+            f"  #{i} ticket={p.ticket}  {p.side} {p.intended_horizon}"
+            f"  TF dominante: {prof['dominant_tfs']}{inferred_tag}"
+        )
+        lines.append(
+            f"     Entrada: {p.entry_price} → Atual: {p.current_price}  "
+            f"P&L: {sign}{p.pnl_pips} pips ({sign}{p.pnl_pct:.3f}%)"
+        )
+        lines.append(
+            f"     SL: {p.sl_price}  TP: {p.tp_price}  "
+            f"Idade: {p.age_minutes:.0f}min "
+            f"(time exit em {prof['max_age_hours']}h)"
+        )
+        if p.open_reasoning:
+            lines.append(f'     Tese original: "{p.open_reasoning}"')
     lines.append(
-        "  Ações disponíveis: HOLD (deixa correr), CLOSE (sair agora), "
-        "TIGHTEN_STOP (apertar SL), OPEN_oposto (reverter)."
+        "  Para CLOSE/TIGHTEN_STOP, informe position_id (ticket) da posição-alvo."
     )
     lines.append("")
     return lines
 
 
+def _current_regime(context: dict) -> str | None:
+    """Hurst regime do 1h no contexto atual — chave para casar com track record."""
+    tfs = context.get("timeframes") or {}
+    h1 = tfs.get("1h") or {}
+    stats = h1.get("statistics") or {}
+    return (stats.get("hurst") or {}).get("regime")
+
+
 def build_prompt(
     context: dict,
-    position: OpenPosition | None = None,
-    original_reasoning: str | None = None,
+    positions: list[OpenPosition],
+    calibration: dict | None = None,
 ) -> tuple[str, str]:
     lines = [
         "=== Contexto de Mercado ===",
@@ -129,15 +192,15 @@ def build_prompt(
         "",
     ]
 
-    if position is not None:
-        lines.extend(_format_position(position, original_reasoning))
-    else:
-        lines.append("[POSIÇÃO ATUAL] Nenhuma - você está flat.")
-        lines.append("")
+    if calibration is not None:
+        from analytics.calibration import format_for_prompt
+        lines.extend(format_for_prompt(calibration, _current_regime(context)))
+
+    lines.extend(_format_positions(positions))
 
     vol_forecast = context.get("vol_forecast", {})
     if vol_forecast:
-        lines.append("[VOLATILIDADE PREVISTA - modelos condicionais]")
+        lines.append("[VOLATILIDADE PREVISTA — modelos condicionais]")
         lines.append(_format_vol_forecast(vol_forecast))
         lines.append("")
 
@@ -147,7 +210,7 @@ def build_prompt(
             continue
         data = tf_data[tf]
         label = _TF_LABELS.get(tf, tf.upper())
-        lines.append(f"[{tf.upper()} - {label}]")
+        lines.append(f"[{tf.upper()} — {label}]")
         lines.append(f"  Tendência (EMA20/50): {data['trend']}")
         lines.append(f"  RSI: {data['rsi']} → {data['rsi_signal']}")
         lines.append(f"  MACD: {data['macd_signal']} (hist {data['macd_hist']})")
@@ -165,7 +228,8 @@ def build_prompt(
 
     lines.append(
         'Retorne sua decisão como JSON: '
-        '{"action": "...", "confidence": 0.0, "reasoning": "...", "new_sl": null}'
+        '{"action": "...", "intended_horizon": "...", "position_id": null, '
+        '"confidence": 0.0, "reasoning": "...", "new_sl": null}'
     )
 
-    return SYSTEM_PROMPT, "\n".join(lines)
+    return _system_prompt(), "\n".join(lines)

@@ -3,19 +3,19 @@
 //|                              Copyright 2026, Guilherme Felipetto |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Guilherme Felipetto"
-#property version   "1.40"
+#property version   "1.70"
 
 #include <Trade/Trade.mqh>
 
 input long   InpMagicNumber  = 20260505;                          // Magic number do EA
-input int    InpSlippage     = 10;                                // Desvio máx em points
+input int    InpSlippage     = 10;                                // Desvio max em points
 input int    InpPollInterval = 30;                                // Intervalo entre polls (s)
 input string InpServerURL    = "http://127.0.0.1:8000/signal";    // Endpoint do servidor
 
 CTrade trade;
 
 //+------------------------------------------------------------------+
-//| Detecta o filling mode suportado pelo broker para o símbolo      |
+//| Filling mode suportado pelo broker para o simbolo                |
 //+------------------------------------------------------------------+
 ENUM_ORDER_TYPE_FILLING DetectFillingMode(const string symbol)
 {
@@ -25,9 +25,6 @@ ENUM_ORDER_TYPE_FILLING DetectFillingMode(const string symbol)
    return ORDER_FILLING_FOK;
 }
 
-//+------------------------------------------------------------------+
-//| OnInit                                                           |
-//+------------------------------------------------------------------+
 int OnInit()
 {
    trade.SetExpertMagicNumber(InpMagicNumber);
@@ -37,9 +34,9 @@ int OnInit()
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
       Print("[!] AVISO: AutoTrading desabilitado no terminal.");
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
-      Print("[!] AVISO: Trading não permitido para este EA.");
+      Print("[!] AVISO: Trading nao permitido para este EA.");
 
-   PrintFormat("EA LLM_Trader v1.40 (stateful) | Symbol: %s | Magic: %d | Poll: %ds",
+   PrintFormat("EA LLM_Trader v1.70 (multi-position) | Symbol: %s | Magic: %d | Poll: %ds",
                _Symbol, InpMagicNumber, InpPollInterval);
    PrintFormat("Libere %s em Tools > Options > Expert Advisors > Allow WebRequest.",
                InpServerURL);
@@ -47,7 +44,7 @@ int OnInit()
 }
 
 //+------------------------------------------------------------------+
-//| OnTick - poll do sinal e dispatch de ação                        |
+//| OnTick - poll do sinal e dispatch                                |
 //+------------------------------------------------------------------+
 void OnTick()
 {
@@ -65,7 +62,7 @@ void OnTick()
    string sig_symbol = ParseField(body, "symbol");
    if(sig_symbol != "" && StringFind(_Symbol, sig_symbol) < 0)
    {
-      PrintFormat("[!] Gráfico (%s) não bate com sinal (%s). Ignorando.",
+      PrintFormat("[!] Grafico (%s) nao bate com sinal (%s). Ignorando.",
                   _Symbol, sig_symbol);
       return;
    }
@@ -78,7 +75,7 @@ void OnTick()
    }
    else if(action == "CLOSE")
    {
-      HandleClose(reasoning);
+      HandleClose(body, reasoning);
    }
    else if(action == "TIGHTEN_STOP")
    {
@@ -86,55 +83,41 @@ void OnTick()
    }
    else
    {
-      PrintFormat("[!] Ação desconhecida: %s", action);
+      PrintFormat("[!] Acao desconhecida: %s", action);
    }
 }
 
 //+------------------------------------------------------------------+
-//| OPEN_LONG / OPEN_SHORT - fecha oposta se houver e abre nova      |
+//| OPEN_LONG / OPEN_SHORT - abre nova posicao.                      |
+//| O servidor (Python) ja validou que nao colide com outras nossas. |
+//| O EA NAO faz mais auto-close de oposta (multi-position v1.7).    |
 //+------------------------------------------------------------------+
 void HandleOpen(const string action, const string body, const string reasoning)
 {
-   bool want_long = (action == "OPEN_LONG");
-
-   if(HasOurPosition(_Symbol, InpMagicNumber))
-   {
-      long pos_type = PositionGetInteger(POSITION_TYPE);
-      bool same_side = (want_long && pos_type == POSITION_TYPE_BUY)
-                    || (!want_long && pos_type == POSITION_TYPE_SELL);
-      if(same_side) return; // já estamos na direção certa
-
-      if(!trade.PositionClose(_Symbol))
-      {
-         PrintFormat("[!] Falha ao fechar oposta: %d %s",
-                     trade.ResultRetcode(), trade.ResultRetcodeDescription());
-         return;
-      }
-      Print("[~] Posição oposta fechada para reversão.");
-   }
-
    double sl  = StringToDouble(ParseField(body, "sl_price"));
    double tp  = StringToDouble(ParseField(body, "tp_price"));
    double lot = StringToDouble(ParseField(body, "lot"));
+   string horizon = ParseField(body, "intended_horizon");
    if(lot <= 0) lot = 0.01;
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   string comment = StringFormat("LLM v1.7 %s", horizon);
 
-   if(want_long)
+   if(action == "OPEN_LONG")
    {
-      if(trade.Buy(lot, _Symbol, ask, sl, tp, "LLM v1.4"))
-         PrintFormat("[+] OPEN_LONG @ %.5f | SL: %.5f  TP: %.5f | %s",
-                     ask, sl, tp, reasoning);
+      if(trade.Buy(lot, _Symbol, ask, sl, tp, comment))
+         PrintFormat("[+] OPEN_LONG [%s] @ %.5f | SL: %.5f TP: %.5f | %s",
+                     horizon, ask, sl, tp, reasoning);
       else
          PrintFormat("[!] Erro OPEN_LONG: %d %s",
                      trade.ResultRetcode(), trade.ResultRetcodeDescription());
    }
    else
    {
-      if(trade.Sell(lot, _Symbol, bid, sl, tp, "LLM v1.4"))
-         PrintFormat("[+] OPEN_SHORT @ %.5f | SL: %.5f  TP: %.5f | %s",
-                     bid, sl, tp, reasoning);
+      if(trade.Sell(lot, _Symbol, bid, sl, tp, comment))
+         PrintFormat("[+] OPEN_SHORT [%s] @ %.5f | SL: %.5f TP: %.5f | %s",
+                     horizon, bid, sl, tp, reasoning);
       else
          PrintFormat("[!] Erro OPEN_SHORT: %d %s",
                      trade.ResultRetcode(), trade.ResultRetcodeDescription());
@@ -142,46 +125,71 @@ void HandleOpen(const string action, const string body, const string reasoning)
 }
 
 //+------------------------------------------------------------------+
-//| CLOSE - fecha posição atual antes de SL/TP                       |
+//| CLOSE - fecha posicao especifica via position_id (ticket).       |
 //+------------------------------------------------------------------+
-void HandleClose(const string reasoning)
+void HandleClose(const string body, const string reasoning)
 {
-   if(!HasOurPosition(_Symbol, InpMagicNumber)) return;
+   long ticket = StringToInteger(ParseField(body, "position_id"));
+   if(ticket <= 0)
+   {
+      Print("[!] CLOSE sem position_id valido.");
+      return;
+   }
 
-   if(trade.PositionClose(_Symbol))
-      PrintFormat("[+] CLOSE executado | %s", reasoning);
+   if(!PositionSelectByTicket((ulong)ticket))
+   {
+      PrintFormat("[!] CLOSE: ticket %d nao encontrado.", ticket);
+      return;
+   }
+   if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+   {
+      PrintFormat("[!] CLOSE: ticket %d nao e nosso (magic diferente).", ticket);
+      return;
+   }
+
+   if(trade.PositionClose((ulong)ticket))
+      PrintFormat("[+] CLOSE ticket %d | %s", ticket, reasoning);
    else
-      PrintFormat("[!] Erro CLOSE: %d %s",
-                  trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      PrintFormat("[!] Erro CLOSE ticket %d: %d %s",
+                  ticket, trade.ResultRetcode(), trade.ResultRetcodeDescription());
 }
 
 //+------------------------------------------------------------------+
-//| TIGHTEN_STOP - modifica SL para travar lucro                     |
-//| Servidor já validou que aperta (não afrouxa).                    |
+//| TIGHTEN_STOP - modifica SL de posicao especifica via ticket.     |
+//| Servidor ja validou que aperta (nao afrouxa).                    |
 //+------------------------------------------------------------------+
 void HandleTightenStop(const string body, const string reasoning)
 {
-   if(!HasOurPosition(_Symbol, InpMagicNumber)) return;
-
+   long ticket = StringToInteger(ParseField(body, "position_id"));
    double new_sl = StringToDouble(ParseField(body, "new_sl"));
-   if(new_sl <= 0)
+   if(ticket <= 0 || new_sl <= 0)
    {
-      Print("[!] TIGHTEN_STOP recebido sem new_sl válido.");
+      Print("[!] TIGHTEN_STOP sem position_id ou new_sl validos.");
+      return;
+   }
+
+   if(!PositionSelectByTicket((ulong)ticket))
+   {
+      PrintFormat("[!] TIGHTEN_STOP: ticket %d nao encontrado.", ticket);
+      return;
+   }
+   if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+   {
+      PrintFormat("[!] TIGHTEN_STOP: ticket %d nao e nosso.", ticket);
       return;
    }
 
    double current_tp = PositionGetDouble(POSITION_TP);
-   ulong  ticket     = (ulong)PositionGetInteger(POSITION_TICKET);
-
-   if(trade.PositionModify(ticket, new_sl, current_tp))
-      PrintFormat("[+] TIGHTEN_STOP → SL=%.5f | %s", new_sl, reasoning);
+   if(trade.PositionModify((ulong)ticket, new_sl, current_tp))
+      PrintFormat("[+] TIGHTEN_STOP ticket %d -> SL=%.5f | %s",
+                  ticket, new_sl, reasoning);
    else
-      PrintFormat("[!] Erro TIGHTEN_STOP: %d %s",
-                  trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      PrintFormat("[!] Erro TIGHTEN_STOP ticket %d: %d %s",
+                  ticket, trade.ResultRetcode(), trade.ResultRetcodeDescription());
 }
 
 //+------------------------------------------------------------------+
-//| WebRequest do sinal corrente                                     |
+//| WebRequest                                                        |
 //+------------------------------------------------------------------+
 bool FetchSignal(string &body_out)
 {
@@ -195,7 +203,7 @@ bool FetchSignal(string &body_out)
 
    if(res == -1)
    {
-      PrintFormat("[!] WebRequest erro %d - libere %s nas configurações.",
+      PrintFormat("[!] WebRequest erro %d - libere %s nas configuracoes.",
                   GetLastError(), InpServerURL);
       return false;
    }
@@ -210,23 +218,7 @@ bool FetchSignal(string &body_out)
 }
 
 //+------------------------------------------------------------------+
-//| Posição NOSSA (mesmo magic) no símbolo? Side effect: seleciona.  |
-//+------------------------------------------------------------------+
-bool HasOurPosition(const string symbol, const long magic)
-{
-   for(int i = 0; i < PositionsTotal(); i++)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) == symbol &&
-         PositionGetInteger(POSITION_MAGIC) == magic)
-         return true;
-   }
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| Parser JSON simples (sem dependência externa)                    |
+//| Parser JSON simples                                              |
 //+------------------------------------------------------------------+
 string ParseField(const string json, const string field)
 {

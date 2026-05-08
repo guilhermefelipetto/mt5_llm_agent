@@ -23,11 +23,33 @@ _RESPONSE_FORMAT = {
                         "TIGHTEN_STOP",
                     ],
                     "description": (
-                        "OPEN_LONG/OPEN_SHORT abre posição (ou inverte se já há "
-                        "oposta aberta). HOLD não faz nada (deixa correr o trade "
-                        "atual ou permanece flat). CLOSE encerra a posição "
-                        "atual antes de SL/TP. TIGHTEN_STOP move o SL para "
-                        "travar lucro - só permitido apertando, nunca afrouxando."
+                        "OPEN_LONG/OPEN_SHORT abre nova posição (escolha "
+                        "intended_horizon). HOLD não faz nada - slot vazio é "
+                        "melhor que slot com trade ruim. CLOSE encerra uma "
+                        "posição existente antes de SL/TP. TIGHTEN_STOP aperta "
+                        "o SL para travar lucro. Para CLOSE/TIGHTEN_STOP com "
+                        "múltiplas posições abertas, position_id é obrigatório."
+                    ),
+                },
+                "intended_horizon": {
+                    "type": ["string", "null"],
+                    "enum": ["scalp", "intraday", "swing", None],
+                    "description": (
+                        "Horizonte da operação. OBRIGATÓRIO para "
+                        "OPEN_LONG/OPEN_SHORT; null para HOLD/CLOSE/"
+                        "TIGHTEN_STOP. scalp = M5/M1 dominante (~minutos a "
+                        "poucas horas), intraday = H1/M30 dominante (~horas), "
+                        "swing = D1/4H dominante (~dias). Cada horizonte tem "
+                        "SL/TP, time exit e cadência de revisita próprios."
+                    ),
+                },
+                "position_id": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        "Ticket da posição-alvo de CLOSE/TIGHTEN_STOP. Null "
+                        "para OPEN/HOLD. Se houver apenas uma posição aberta, "
+                        "pode ser null e o sistema infere; com múltiplas, é "
+                        "obrigatório."
                     ),
                 },
                 "confidence": {
@@ -46,7 +68,10 @@ _RESPONSE_FORMAT = {
                     ),
                 },
             },
-            "required": ["action", "confidence", "reasoning", "new_sl"],
+            "required": [
+                "action", "intended_horizon", "position_id",
+                "confidence", "reasoning", "new_sl",
+            ],
             "additionalProperties": False,
         },
     },
@@ -83,6 +108,8 @@ class LLMManager:
     def _neutral() -> dict:
         return {
             "action": "HOLD",
+            "intended_horizon": None,
+            "position_id": None,
             "confidence": 0.0,
             "reasoning": "Falha na inferência.",
             "new_sl": None,

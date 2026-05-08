@@ -4,9 +4,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# ---------------------------------------------------------------------------
+# Perfis de horizonte (v1.7)
+#
+# Cada trade carrega um `intended_horizon` enum, escolhido pelo LLM no momento
+# da abertura. O horizonte parametriza simultaneamente:
+#   - sl_mult, tp_mult: multiplicadores de σ (vol prevista) para SL/TP
+#   - max_age_hours:    time exit específico do horizonte
+#   - cadence_s:        cadência de revisita quando há trade desse horizonte aberto
+#
+# Quanto maior o horizonte, mais frouxo o stop, mais paciência no time exit
+# e mais lenta a cadência de análise.
+# ---------------------------------------------------------------------------
+HORIZON_PROFILES: dict[str, dict] = {
+    "scalp":    {"sl_mult": 1.0, "tp_mult": 1.5, "max_age_hours": 4,   "cadence_s": 90,  "dominant_tfs": "M5/M1"},
+    "intraday": {"sl_mult": 1.5, "tp_mult": 2.5, "max_age_hours": 24,  "cadence_s": 180, "dominant_tfs": "H1/M30"},
+    "swing":    {"sl_mult": 2.5, "tp_mult": 5.0, "max_age_hours": 336, "cadence_s": 600, "dominant_tfs": "D1/4H"},
+}
+HORIZONS: tuple[str, ...] = tuple(HORIZON_PROFILES.keys())
+DEFAULT_HORIZON: str = "intraday"
+
+
 class Settings:
     # Versionamento - usado para filtrar logs por iteração do agente
-    model_version: str = os.getenv("MODEL_VERSION", "v1.6.0")
+    model_version: str = os.getenv("MODEL_VERSION", "v1.8.0")
 
     # LLM
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
@@ -17,12 +38,17 @@ class Settings:
     yf_symbol: str = os.getenv("YF_SYMBOL", "EURUSD=X")
 
     # Analysis
-    analysis_interval: int = int(os.getenv("ANALYSIS_INTERVAL", "300"))  # seconds
+    # analysis_interval = cadência usada quando NÃO há posições abertas (flat).
+    # Quando há, a cadência é dinâmica: min(cadence_s) entre as posições ativas.
+    analysis_interval: int = int(os.getenv("ANALYSIS_INTERVAL", "300"))
     signal_ttl: int = int(os.getenv("SIGNAL_TTL", "300"))
 
+    # Multi-position (v1.7) - teto de posições simultâneas. Regra adicional:
+    # uma posição por (lado, horizonte) — não dobra aposta no mesmo setup.
+    # ATENÇÃO: risco máximo agregado = MAX_POSITIONS × RISK_PER_TRADE_PCT.
+    max_positions: int = int(os.getenv("MAX_POSITIONS", "3"))
+
     # Risk
-    atr_sl_multiplier: float = float(os.getenv("ATR_SL_MULTIPLIER", "1.5"))
-    atr_tp_multiplier: float = float(os.getenv("ATR_TP_MULTIPLIER", "2.5"))
     min_confidence: float = float(os.getenv("MIN_CONFIDENCE", "0.6"))
 
     # Position sizing dinâmico (v1.6) - lot calculado por
@@ -39,10 +65,6 @@ class Settings:
     # limite for excedido. CLOSE/TIGHTEN_STOP nunca são bloqueados.
     daily_drawdown_pct: float = float(os.getenv("DAILY_DRAWDOWN_PCT", "2.0"))
     max_consecutive_losses: int = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))
-
-    # Time-based exit (v1.6) - força CLOSE em trades pendurados há mais
-    # tempo que o limite. 0 desabilita.
-    max_trade_age_hours: float = float(os.getenv("MAX_TRADE_AGE_HOURS", "24"))
 
     # Volatility estimator - garch | har_rv | atr
     vol_estimator: str = os.getenv("VOL_ESTIMATOR", "garch")
