@@ -3,14 +3,16 @@
 //|                              Copyright 2026, Guilherme Felipetto |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Guilherme Felipetto"
-#property version   "1.70"
+#property version   "1.71"
 
 #include <Trade/Trade.mqh>
 
 input long   InpMagicNumber  = 20260505;                          // Magic number do EA
 input int    InpSlippage     = 10;                                // Desvio max em points
 input int    InpPollInterval = 30;                                // Intervalo entre polls (s)
-input string InpServerURL    = "http://127.0.0.1:8000/signal";    // Endpoint do servidor
+
+// Endpoint do servidor. Sob Wine, use IP de LAN (loopback falha com erro 1003).
+input string InpServerURL    = "http://192.168.15.70:8000/signal";
 
 CTrade trade;
 
@@ -36,7 +38,7 @@ int OnInit()
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
       Print("[!] AVISO: Trading nao permitido para este EA.");
 
-   PrintFormat("EA LLM_Trader v1.70 (multi-position) | Symbol: %s | Magic: %d | Poll: %ds",
+   PrintFormat("EA LLM_Trader v1.71 (multi-position, dedup signal_id) | Symbol: %s | Magic: %d | Poll: %ds",
                _Symbol, InpMagicNumber, InpPollInterval);
    PrintFormat("Libere %s em Tools > Options > Expert Advisors > Allow WebRequest.",
                InpServerURL);
@@ -49,6 +51,8 @@ int OnInit()
 void OnTick()
 {
    static datetime last_check = 0;
+   static string   last_signal_id = "";
+
    if(TimeCurrent() - last_check < InpPollInterval) return;
    last_check = TimeCurrent();
 
@@ -58,6 +62,13 @@ void OnTick()
    string action = ParseField(body, "action");
    string valid  = ParseField(body, "valid");
    if(action == "" || action == "HOLD" || valid == "false") return;
+
+   // Dedup por signal_id — o servidor mantem o mesmo signal valido ate o TTL
+   // expirar (300s padrao); sem essa guarda, polls subsequentes (30s) re-executariam
+   // a mesma ordem, gerando ate 10 trades duplicados por signal.
+   string signal_id = ParseField(body, "signal_id");
+   if(signal_id == "" || signal_id == last_signal_id) return;
+   last_signal_id = signal_id;
 
    string sig_symbol = ParseField(body, "symbol");
    if(sig_symbol != "" && StringFind(_Symbol, sig_symbol) < 0)
