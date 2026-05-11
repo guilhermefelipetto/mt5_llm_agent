@@ -55,7 +55,14 @@ def _system_prompt() -> str:
         "é obrigatório.\n"
         "- TIGHTEN_STOP: aperta o SL para travar lucro acumulado. Só "
         "permitido movendo na direção do preço (long: subir SL; short: "
-        "descer SL). Sistema rejeita afrouxamentos.\n\n"
+        "descer SL). REGRA QUANTITATIVA: só faz sentido apertar quando o "
+        "trade já percorreu pelo menos 50% do caminho até o TP — antes "
+        "disso, o ruído normal de mercado é maior que o lucro e apertar "
+        "transforma o trade num scalp de baixa expectativa. Quando "
+        "apertar, deixe pelo menos 30% do lucro acumulado como margem; "
+        "colar o SL próximo do preço atual significa fechar no próximo "
+        "tick contrário. Sistema rejeita tanto afrouxamentos quanto "
+        "apertos prematuros.\n\n"
 
         f"PERFIS DE HORIZONTE:\n{profiles_block}\n\n"
 

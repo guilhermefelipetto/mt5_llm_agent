@@ -199,6 +199,38 @@ def _validate_action(
                 reasoning,
             )
             return a, None, None, None, r
+
+        # Guardrails anti-aperto-prematuro (v1.8.1):
+        # (A) progresso mínimo até o TP antes de permitir apertar
+        # (B) margem mínima entre novo SL e preço atual em relação ao lucro
+        if target.side == "LONG":
+            tp_dist = target.tp_price - target.entry_price
+            current_gain = target.current_price - target.entry_price
+            sl_from_current = target.current_price - new_sl
+        else:  # SHORT
+            tp_dist = target.entry_price - target.tp_price
+            current_gain = target.entry_price - target.current_price
+            sl_from_current = new_sl - target.current_price
+
+        if tp_dist > 0 and current_gain > 0:
+            progress = current_gain / tp_dist
+            if progress < settings.min_tighten_progress:
+                a, r = _downgrade(
+                    f"TIGHTEN precoce: progresso {progress:.0%} < mínimo "
+                    f"{settings.min_tighten_progress:.0%} do caminho ao TP",
+                    reasoning,
+                )
+                return a, None, None, None, r
+
+            trail_buffer = sl_from_current / current_gain
+            if trail_buffer < settings.min_trail_buffer:
+                a, r = _downgrade(
+                    f"SL muito colado: buffer {trail_buffer:.0%} < mínimo "
+                    f"{settings.min_trail_buffer:.0%} do lucro acumulado",
+                    reasoning,
+                )
+                return a, None, None, None, r
+
         return action, None, target.ticket, round(new_sl, 5), reasoning
 
     # HOLD

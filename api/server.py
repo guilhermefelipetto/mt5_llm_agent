@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="MT5 LLM Agent", version="1.8.0", lifespan=lifespan)
+app = FastAPI(title="MT5 LLM Agent", version="1.8.1", lifespan=lifespan)
 app.include_router(dashboard_router)
 
 

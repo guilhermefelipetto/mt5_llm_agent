@@ -27,7 +27,7 @@ DEFAULT_HORIZON: str = "intraday"
 
 class Settings:
     # Versionamento - usado para filtrar logs por iteração do agente
-    model_version: str = os.getenv("MODEL_VERSION", "v1.8.0")
+    model_version: str = os.getenv("MODEL_VERSION", "v1.8.1")
 
     # LLM
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
@@ -65,6 +65,14 @@ class Settings:
     # limite for excedido. CLOSE/TIGHTEN_STOP nunca são bloqueados.
     daily_drawdown_pct: float = float(os.getenv("DAILY_DRAWDOWN_PCT", "2.0"))
     max_consecutive_losses: int = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))
+
+    # TIGHTEN_STOP guardrails (v1.8.1) - evitam aperto prematuro de SL.
+    # min_tighten_progress: fração [0,1] do caminho entry->TP que o trade
+    #   precisa ter percorrido antes de permitir TIGHTEN_STOP.
+    # min_trail_buffer: fração [0,1] do lucro acumulado que o novo SL deve
+    #   deixar como margem (impede colar SL no preço atual).
+    min_tighten_progress: float = float(os.getenv("MIN_TIGHTEN_PROGRESS", "0.5"))
+    min_trail_buffer: float = float(os.getenv("MIN_TRAIL_BUFFER", "0.3"))
 
     # Volatility estimator - garch | har_rv | atr
     vol_estimator: str = os.getenv("VOL_ESTIMATOR", "garch")

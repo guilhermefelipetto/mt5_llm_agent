@@ -92,27 +92,77 @@ def _match_open_signal(opened_at: datetime.datetime, side: str) -> dict | None:
     return candidates[0][1]
 
 
-def _classify_close(deal_close, position_close_price: float, sl: float, tp: float, side: str) -> str:
-    """Inferir motivo do fechamento a partir do preço de saída + SL/TP da abertura.
+def _signals_for_position(
+    position_id: int,
+    opened_at: datetime.datetime,
+    closed_at: datetime.datetime,
+    action_filter: str,
+) -> list[dict]:
+    """Sinais do tipo `action_filter` que tinham position_id alvo dentro
+    do ciclo de vida do trade."""
+    out = []
+    for s in _read_signals_log():
+        if s.get("action") != action_filter:
+            continue
+        if s.get("position_id") != position_id:
+            continue
+        try:
+            ts = datetime.datetime.fromisoformat(s["created_at"])
+        except (KeyError, ValueError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        if ts < opened_at or ts > closed_at:
+            continue
+        out.append((ts, s))
+    return [s for _, s in sorted(out, key=lambda t: t[0])]
 
-    O MT5 expõe `reason` no deal mas é genérico (e.g. EXPERT/CLIENT). Inferir
-    pelo preço dá rótulo mais útil para análise de performance do agente.
+
+def _classify_close(
+    position_close_price: float,
+    sl_open: float,
+    tp_open: float,
+    side: str,
+    position_id: int,
+    opened_at: datetime.datetime,
+    closed_at: datetime.datetime,
+) -> str:
+    """Infere motivo do fechamento cruzando preço de saída com SL/TP originais,
+    com sinais de TIGHTEN_STOP/CLOSE emitidos durante a vida do trade.
+
+    Taxonomia:
+      tp            - bateu o TP original
+      sl            - bateu o SL original (não houve aperto)
+      sl_tightened  - bateu um SL apertado por TIGHTEN_STOP
+      close         - fechado por ação CLOSE explícita do agente
+      manual        - fechado fora do controle do agente (intervenção humana
+                      no terminal, desconexão do broker, etc)
     """
-    if not sl and not tp:
-        return "manual"
     tol = settings.pip_size * 2  # 2 pips de tolerância (slippage)
-    if side == "LONG":
-        if tp and abs(position_close_price - tp) <= tol:
-            return "tp"
-        if sl and abs(position_close_price - sl) <= tol:
-            return "sl"
-    else:
-        if tp and abs(position_close_price - tp) <= tol:
-            return "tp"
-        if sl and abs(position_close_price - sl) <= tol:
-            return "sl"
-    # Fechou longe de SL/TP → CLOSE manual ou reversão pelo agente.
-    # Distinguir requer cruzar com signals.jsonl (TODO se virar útil).
+
+    if sl_open and abs(position_close_price - sl_open) <= tol:
+        return "sl"
+    if tp_open and abs(position_close_price - tp_open) <= tol:
+        return "tp"
+
+    # Sinal de CLOSE explícito durante o trade → fechamento discricionário
+    if position_id and _signals_for_position(
+        position_id, opened_at, closed_at, "CLOSE"
+    ):
+        return "close"
+
+    # Algum TIGHTEN_STOP aceito? Usa o SL apertado mais recente como referência.
+    tightens = (
+        _signals_for_position(position_id, opened_at, closed_at, "TIGHTEN_STOP")
+        if position_id else []
+    )
+    last_new_sl = next(
+        (s.get("new_sl") for s in reversed(tightens) if s.get("new_sl")),
+        None,
+    )
+    if last_new_sl and abs(position_close_price - float(last_new_sl)) <= tol:
+        return "sl_tightened"
+
     return "manual"
 
 
@@ -174,7 +224,13 @@ def capture_closed_trades() -> int:
             tp_open = sig.get("tp_price") if sig else None
 
             close_reason = _classify_close(
-                exit_d, exit_d.price, sl_open or 0, tp_open or 0, side
+                position_close_price=float(exit_d.price),
+                sl_open=sl_open or 0,
+                tp_open=tp_open or 0,
+                side=side,
+                position_id=pos_id,
+                opened_at=opened_at,
+                closed_at=closed_at,
             )
 
             entry_price = float(entry.price)
