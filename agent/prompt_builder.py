@@ -26,9 +26,12 @@ def _system_prompt() -> str:
     do agente (max_positions, perfis de horizonte ativos)."""
     profiles_lines = []
     for h, prof in HORIZON_PROFILES.items():
+        sl_eff = prof["sl_mult"] * prof["sigma_scale"]
+        tp_eff = prof["tp_mult"] * prof["sigma_scale"]
         profiles_lines.append(
-            f"  - {h}: TF dominante {prof['dominant_tfs']}; SL≈{prof['sl_mult']}σ, "
-            f"TP≈{prof['tp_mult']}σ; time exit {prof['max_age_hours']}h"
+            f"  - {h}: TF dominante {prof['dominant_tfs']}; "
+            f"SL≈{sl_eff:.1f}σ_1h, TP≈{tp_eff:.1f}σ_1h; "
+            f"time exit {prof['max_age_hours']}h"
         )
     profiles_block = "\n".join(profiles_lines)
 
@@ -64,7 +67,15 @@ def _system_prompt() -> str:
         "tick contrário. Sistema rejeita tanto afrouxamentos quanto "
         "apertos prematuros.\n\n"
 
-        f"PERFIS DE HORIZONTE:\n{profiles_block}\n\n"
+        f"PERFIS DE HORIZONTE (SL/TP em múltiplos de σ_1h, já escalados pelo "
+        f"tempo esperado de holding via sqrt(T)):\n{profiles_block}\n\n"
+        "OBSERVAÇÃO: o sistema dimensiona SL/TP automaticamente a partir do "
+        "horizonte escolhido. Um SL de swing é genuinamente largo (dezenas "
+        "de σ horário); um SL de scalp é apertado. Você não controla isso "
+        "diretamente, mas sua escolha de horizonte determina a margem que o "
+        "trade terá pra respirar. Escolher swing significa aceitar drawdowns "
+        "intermediários grandes em troca de capturar movimentos maiores; "
+        "escolher scalp significa aceitar muitos trades pequenos.\n\n"
 
         "HIERARQUIA CONDICIONAL DE TIMEFRAMES:\n"
         "Cada horizonte tem TF DOMINANTE diferente. NÃO aplique a mesma "
@@ -82,6 +93,15 @@ def _system_prompt() -> str:
         "- Permitido abrir múltiplas posições, MAS uma por (lado, horizonte). "
         "Não dobre aposta no mesmo setup - se já há LONG intraday aberto, "
         "novo OPEN_LONG só se for de outro horizonte (scalp ou swing).\n"
+        "- IMPORTANTE: ter uma posição swing aberta NÃO consome sua atenção "
+        "do mercado. Um swing está esperando dias; durante esse tempo, há "
+        "oportunidades de scalp e intraday acontecendo. Quando avaliar com "
+        "posição swing aberta, considere ativamente se há setup independente "
+        "pra outro horizonte. Slots vazios são oportunidades perdidas, "
+        "exceto se nenhum setup convincente existe (HOLD nesse caso).\n"
+        "- O horizonte scalp é especialmente subutilizado quando se está "
+        "preso analisando trades maiores. Em mercado parado para swing, "
+        "ainda pode haver micro-movimentos de scalp.\n"
         f"- Risco máximo agregado = {settings.max_positions} × "
         f"{settings.risk_per_trade_pct}% = {settings.max_positions * settings.risk_per_trade_pct:.1f}% "
         "do equity se todas baterem SL juntas.\n\n"
@@ -105,7 +125,15 @@ def _system_prompt() -> str:
         "alto (>60%) com amostra >= 10 é validação parcial. Amostras n<10 "
         "são ruído.\n"
         "5. Não force operação - HOLD é resposta válida e frequentemente "
-        "correta."
+        "correta.\n"
+        "6. VOCABULÁRIO DE P&L: o campo pnl_pips é SINALIZADO. "
+        "Negativo = PREJUÍZO; positivo = LUCRO. Use exatamente essas palavras "
+        "no seu reasoning quando referir ao P&L corrente. Não use 'ganho "
+        "pequeno' quando o valor é negativo, mesmo que o módulo seja pequeno - "
+        "essa imprecisão polui a auto-calibração futura. Se quiser falar "
+        "de magnitude sem direção, use 'movimento pequeno' ou 'oscilação "
+        "próxima do break-even'. O bloco [LUCRO atual] ou [PREJUÍZO atual] "
+        "ao lado do P&L é a fonte da verdade."
     )
 
 
@@ -154,6 +182,15 @@ def _format_positions(positions: list[OpenPosition]) -> list[str]:
     lines = [f"[POSIÇÕES ATUAIS] {len(positions)} aberta(s):"]
     for i, p in enumerate(positions, 1):
         sign = "+" if p.pnl_pips >= 0 else ""
+        # Rótulo explícito pra forçar o LLM a não chamar PREJUÍZO de "ganho"
+        # (vício de português brasileiro coloquial onde "ganho" às vezes vira
+        # sinônimo de "P&L" sem sinal). Inconsistência observada em logs reais.
+        if p.pnl_pips > 0:
+            status = "LUCRO atual"
+        elif p.pnl_pips < 0:
+            status = "PREJUÍZO atual"
+        else:
+            status = "no break-even"
         prof = HORIZON_PROFILES[p.intended_horizon]
         inferred_tag = "  (horizonte inferido)" if p.horizon_inferred else ""
         lines.append(
@@ -162,7 +199,8 @@ def _format_positions(positions: list[OpenPosition]) -> list[str]:
         )
         lines.append(
             f"     Entrada: {p.entry_price} → Atual: {p.current_price}  "
-            f"P&L: {sign}{p.pnl_pips} pips ({sign}{p.pnl_pct:.3f}%)"
+            f"P&L: {sign}{p.pnl_pips} pips ({sign}{p.pnl_pct:.3f}%)  "
+            f"[{status}]"
         )
         lines.append(
             f"     SL: {p.sl_price}  TP: {p.tp_price}  "

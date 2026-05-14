@@ -17,9 +17,14 @@ load_dotenv()
 # e mais lenta a cadência de análise.
 # ---------------------------------------------------------------------------
 HORIZON_PROFILES: dict[str, dict] = {
-    "scalp":    {"sl_mult": 1.0, "tp_mult": 1.5, "max_age_hours": 4,   "cadence_s": 90,  "dominant_tfs": "M5/M1"},
-    "intraday": {"sl_mult": 1.5, "tp_mult": 2.5, "max_age_hours": 24,  "cadence_s": 180, "dominant_tfs": "H1/M30"},
-    "swing":    {"sl_mult": 2.5, "tp_mult": 5.0, "max_age_hours": 336, "cadence_s": 600, "dominant_tfs": "D1/4H"},
+    # sigma_scale: fator multiplicativo sobre o σ horário (GARCH 1h), seguindo
+    # σ_T ≈ σ_1h × sqrt(T_horas) sob random walk. Os valores são raízes
+    # aproximadas das durações esperadas de holding por horizonte. Sem isso,
+    # SL/TP de swing ficariam dimensionados pra horas (ruído de curto prazo
+    # fecha o trade antes da tese ter chance de se desenvolver).
+    "scalp":    {"sl_mult": 1.0, "tp_mult": 1.5, "sigma_scale": 1.0, "max_age_hours": 4,   "cadence_s": 90,  "dominant_tfs": "M5/M1"},
+    "intraday": {"sl_mult": 1.5, "tp_mult": 2.5, "sigma_scale": 3.0, "max_age_hours": 24,  "cadence_s": 180, "dominant_tfs": "H1/M30"},
+    "swing":    {"sl_mult": 2.5, "tp_mult": 5.0, "sigma_scale": 8.0, "max_age_hours": 336, "cadence_s": 600, "dominant_tfs": "D1/4H"},
 }
 HORIZONS: tuple[str, ...] = tuple(HORIZON_PROFILES.keys())
 DEFAULT_HORIZON: str = "intraday"
@@ -27,7 +32,7 @@ DEFAULT_HORIZON: str = "intraday"
 
 class Settings:
     # Versionamento - usado para filtrar logs por iteração do agente
-    model_version: str = os.getenv("MODEL_VERSION", "v1.8.1")
+    model_version: str = os.getenv("MODEL_VERSION", "v1.9.0")
 
     # LLM
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")

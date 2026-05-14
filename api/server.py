@@ -127,7 +127,7 @@ async def run_analysis() -> int:
     )
     llm_latency_ms = int((time.time() - t0) * 1000)
 
-    signal = build_signal(llm_response, context, positions)
+    signal = build_signal(llm_response, context, positions, calibration)
     current_signal = signal
     _log(signal, context, positions, llm_latency_ms, calibration)
 
@@ -137,9 +137,17 @@ async def run_analysis() -> int:
     target_tag = (
         f" #{signal.position_id}" if signal.position_id else ""
     )
+    if signal.calibration_meta.get("applied"):
+        conf_tag = (
+            f"conf: {signal.calibrated_confidence:.0%} "
+            f"(bruta {signal.confidence:.0%}, "
+            f"prior {signal.calibration_meta['prior']:.0%}, "
+            f"n={signal.calibration_meta['n_trades']})"
+        )
+    else:
+        conf_tag = f"conf: {signal.confidence:.0%}"
     print(
-        f"[+] {signal.action}{horizon_tag}{target_tag} | "
-        f"conf: {signal.confidence:.0%} | "
+        f"[+] {signal.action}{horizon_tag}{target_tag} | {conf_tag} | "
         f"latency: {llm_latency_ms}ms | {signal.reasoning}"
     )
     return _next_interval(positions)
@@ -163,7 +171,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="MT5 LLM Agent", version="1.8.1", lifespan=lifespan)
+app = FastAPI(title="MT5 LLM Agent", version="1.9.0", lifespan=lifespan)
 app.include_router(dashboard_router)
 
 

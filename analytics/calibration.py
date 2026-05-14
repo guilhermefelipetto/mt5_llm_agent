@@ -229,6 +229,42 @@ def format_for_prompt(calibration: dict, current_regime: str | None) -> list[str
     return lines
 
 
+def posterior_win_rate(
+    calibration: dict,
+    regime: str | None,
+    horizon: str,
+    side: str,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+) -> tuple[float, int, str]:
+    """Posterior do win rate sob prior Beta(alpha, beta) conjugado a Bernoulli.
+
+    Para w vitórias em n trades:  E[p | dados] = (alpha + w) / (alpha + beta + n).
+    Prior default Beta(1,1) é a Regra de Sucessão de Laplace - não informativo,
+    puxa o estimador pra 0.5 quando n é pequeno (efeito de regressão à média).
+
+    Faz cascata de fallback no bucket: (regime, horizonte, lado) -> (horizonte,
+    lado) -> overall -> só-prior. Retorna (p_posterior, n_efetivo, bucket_usado).
+    """
+    if regime is not None:
+        stats = calibration["by_full_key"].get((regime, horizon, side))
+        if stats and stats.n_trades > 0:
+            p = (alpha + stats.n_wins) / (alpha + beta + stats.n_trades)
+            return p, stats.n_trades, "full"
+
+    stats = calibration["by_horizon_side"].get((horizon, side))
+    if stats and stats.n_trades > 0:
+        p = (alpha + stats.n_wins) / (alpha + beta + stats.n_trades)
+        return p, stats.n_trades, "horizon_side"
+
+    overall = calibration.get("overall")
+    if overall and overall.n_trades > 0:
+        p = (alpha + overall.n_wins) / (alpha + beta + overall.n_trades)
+        return p, overall.n_trades, "overall"
+
+    return alpha / (alpha + beta), 0, "prior_only"
+
+
 def calibration_to_json(calibration: dict) -> dict:
     """Serializa o calibration dict pra JSON (chaves de tupla viram strings).
 

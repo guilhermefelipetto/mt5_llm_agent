@@ -1,6 +1,7 @@
 import datetime
 from dataclasses import dataclass
 
+from analytics.calibration import posterior_win_rate
 from config import HORIZON_PROFILES, HORIZONS, settings
 from data.account import get_account_equity
 from data.positions import OpenPosition
@@ -25,7 +26,9 @@ class Signal:
     action: str
     intended_horizon: str | None    # scalp | intraday | swing | None
     position_id: int | None         # ticket da posição-alvo (CLOSE/TIGHTEN_STOP)
-    confidence: float
+    confidence: float               # auto-relato bruto do LLM
+    calibrated_confidence: float    # posterior Bayesiana com prior empírico (v1.9)
+    calibration_meta: dict          # {prior, bucket, n_trades, source}
     reasoning: str
     entry_price: float | None
     sl_price: float | None
@@ -49,6 +52,8 @@ class Signal:
             "intended_horizon": self.intended_horizon,
             "position_id": self.position_id,
             "confidence": self.confidence,
+            "calibrated_confidence": self.calibrated_confidence,
+            "calibration_meta": self.calibration_meta,
             "reasoning": self.reasoning,
             "entry_price": self.entry_price,
             "sl_price": self.sl_price,
@@ -66,6 +71,69 @@ class Signal:
 
 def _downgrade(reason: str, original_reasoning: str) -> tuple[str, str]:
     return "HOLD", f"[downgrade: {reason}] {original_reasoning}"
+
+
+def _extract_regime(context: dict) -> str | None:
+    """Hurst regime do 1h, mesma chave usada em analytics.calibration."""
+    tfs = (context.get("timeframes") or {})
+    h1 = tfs.get("1h") or {}
+    stats = h1.get("statistics") or {}
+    return (stats.get("hurst") or {}).get("regime")
+
+
+def _bayes_calibrate(
+    confidence: float,
+    action: str,
+    intended_horizon: str | None,
+    context: dict,
+    calibration: dict | None,
+) -> tuple[float, dict]:
+    """Correção Bayesiana de prior (Saerens et al., 2002).
+
+    Trata `confidence` do LLM como posterior sob prior uniforme implícito (0.5)
+    e desloca pro prior empírico p do bucket (regime, horizonte, lado):
+
+        calibrated = (p · c) / (p · c + (1 - p) · (1 - c))
+
+    equivalentemente: posterior_odds = LR · prior_odds, onde
+    LR = c / (1 - c) é o likelihood ratio implícito reportado pelo LLM.
+
+    Quando n=0 no bucket, o posterior Beta(1,1) degenera pra p=0.5 e a fórmula
+    devolve `confidence` inalterado - degrada graciosamente sem dados.
+
+    Aplicado só em OPEN_LONG/OPEN_SHORT. Outras ações (HOLD/CLOSE/TIGHTEN)
+    passam direto: o bucket de calibração descreve win rate de aberturas,
+    não há mapeamento natural pra ações de gerenciamento.
+    """
+    if action not in ("OPEN_LONG", "OPEN_SHORT") or calibration is None:
+        return confidence, {"applied": False, "reason": "action_not_open"}
+
+    side = "LONG" if action == "OPEN_LONG" else "SHORT"
+    horizon = intended_horizon or ""
+    if horizon not in HORIZONS:
+        return confidence, {"applied": False, "reason": "no_horizon"}
+
+    regime = _extract_regime(context)
+    prior, n_trades, source = posterior_win_rate(
+        calibration, regime, horizon, side
+    )
+
+    # Clamp pra evitar 0/0 nos extremos (confidence pode vir 1.0 do LLM).
+    c = max(1e-4, min(1 - 1e-4, confidence))
+    p = max(1e-4, min(1 - 1e-4, prior))
+    numerator = p * c
+    denominator = numerator + (1 - p) * (1 - c)
+    calibrated = numerator / denominator if denominator > 0 else confidence
+
+    return round(calibrated, 4), {
+        "applied": True,
+        "prior": round(prior, 4),
+        "bucket": source,
+        "n_trades": n_trades,
+        "regime": regime,
+        "horizon": horizon,
+        "side": side,
+    }
 
 
 def _resolve_target_position(
@@ -279,6 +347,7 @@ def build_signal(
     llm_response: dict,
     context: dict,
     positions: list[OpenPosition],
+    calibration: dict | None = None,
 ) -> Signal:
     raw_action = str(llm_response.get("action", "HOLD")).upper().strip()
     reasoning = str(llm_response.get("reasoning", ""))
@@ -320,17 +389,27 @@ def build_signal(
     circuit = evaluate_circuit(equity)
     action, reasoning = _apply_circuit_breaker(action, reasoning, circuit)
 
-    # 4. Filtro de confiança (v1.4).
+    # 4. Calibração Bayesiana de confiança (v1.9). Combina prior empírico
+    # (win rate posterior do bucket) com auto-relato do LLM via prior-shift
+    # de Saerens et al. (2002). Filtro e sizing passam a operar sobre a
+    # calibrada - confiança bruta fica preservada só pra log/auditoria.
+    calibrated_confidence, calibration_meta = _bayes_calibrate(
+        confidence, action, intended_horizon, context, calibration
+    )
+
+    # 5. Filtro de confiança (v1.4, sobre calibrada desde v1.9).
     actionable = action in ("OPEN_LONG", "OPEN_SHORT", "CLOSE", "TIGHTEN_STOP")
-    if actionable and confidence < settings.min_confidence:
+    if actionable and calibrated_confidence < settings.min_confidence:
         action, reasoning = _downgrade(
-            f"confiança insuficiente ({confidence:.0%})", reasoning
+            f"confiança calibrada insuficiente ({calibrated_confidence:.0%}, "
+            f"bruta {confidence:.0%})",
+            reasoning,
         )
         new_sl = None
         intended_horizon = None
         position_id = None
 
-    # 5. Compute SL/TP and lot for opens, scaled by horizon.
+    # 6. Compute SL/TP and lot for opens, scaled by horizon.
     price = context.get("current_price") or 0.0
     vol = get_vol_estimate(context)
 
@@ -342,15 +421,21 @@ def build_signal(
     if action in ("OPEN_LONG", "OPEN_SHORT") and price and intended_horizon:
         profile = HORIZON_PROFILES[intended_horizon]
         entry_price = price
-        sl_dist = vol.sigma * profile["sl_mult"]
-        tp_dist = vol.sigma * profile["tp_mult"]
+        # σ_T = σ_1h × sqrt(T_horas) sob random walk (v1.8.2). Sem isso,
+        # SL/TP do swing ficariam dimensionados pra horas, e ruído normal
+        # fecharia o trade antes da tese ter chance de se desenvolver.
+        sigma_scaled = vol.sigma * profile["sigma_scale"]
+        sl_dist = sigma_scaled * profile["sl_mult"]
+        tp_dist = sigma_scaled * profile["tp_mult"]
         if action == "OPEN_LONG":
             sl_price = round(price - sl_dist, 5)
             tp_price = round(price + tp_dist, 5)
         else:
             sl_price = round(price + sl_dist, 5)
             tp_price = round(price - tp_dist, 5)
-        lot = compute_lot(equity, confidence, entry_price, sl_price)
+        # Sizing usa calibrated_confidence (v1.9): se prior empírico mostra
+        # que o LLM é overconfident no bucket, lot encolhe automaticamente.
+        lot = compute_lot(equity, calibrated_confidence, entry_price, sl_price)
 
     now = datetime.datetime.now(datetime.timezone.utc)
     return Signal(
@@ -360,6 +445,8 @@ def build_signal(
         intended_horizon=intended_horizon,
         position_id=position_id,
         confidence=confidence,
+        calibrated_confidence=calibrated_confidence,
+        calibration_meta=calibration_meta,
         reasoning=reasoning,
         entry_price=entry_price,
         sl_price=sl_price,

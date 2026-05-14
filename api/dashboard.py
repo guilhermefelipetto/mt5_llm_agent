@@ -639,6 +639,13 @@ function renderLast(s) {
   `;
 }
 
+function fmtPrice(v) {
+  // EURUSD usa 5 decimais. MT5 às vezes devolve floats com lixo de
+  // precisão (ex: 1.1776100000000003); o toFixed normaliza pra largura
+  // visual consistente da coluna.
+  return (v != null) ? Number(v).toFixed(5) : '—';
+}
+
 function renderPositions(positions) {
   const tbody = document.querySelector('#positions tbody');
   tbody.innerHTML = '';
@@ -653,11 +660,11 @@ function renderPositions(positions) {
         <td>${p.ticket}</td>
         <td>${p.side}</td>
         <td>${horizonTag}</td>
-        <td class="num">${p.entry_price}</td>
-        <td class="num">${p.current_price}</td>
+        <td class="num">${fmtPrice(p.entry_price)}</td>
+        <td class="num">${fmtPrice(p.current_price)}</td>
         <td class="num">${fmtPnL(p.pnl_pips, ' pips')}</td>
-        <td class="num">${p.sl_price}</td>
-        <td class="num">${p.tp_price}</td>
+        <td class="num">${fmtPrice(p.sl_price)}</td>
+        <td class="num">${fmtPrice(p.tp_price)}</td>
         <td class="num">${p.age_minutes.toFixed(0)}min</td>
       </tr>`;
   }
